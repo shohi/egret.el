@@ -172,12 +172,54 @@ first), looking for a `keyed_element' child whose key matches
         (setq node (treesit-node-parent node)))
       nil)))
 
+(defun egret--subtest-run-name (name)
+  "Turn raw subtest NAME into the identifier `go test' uses for it.
+`go test' replaces whitespace in subtest names with underscores when
+generating the runnable subtest name."
+  (replace-regexp-in-string "[[:space:]]+" "_" name))
+
 (defun egret--normalize-subtest-name (name)
   "Turn raw subtest NAME into the form `go test -run' expects.
-`go test' replaces whitespace in subtest names with underscores when
-generating the runnable subtest name; the result is then
-regexp-quoted so it can be embedded in a `-run' pattern."
-  (regexp-quote (replace-regexp-in-string "[[:space:]]+" "_" name)))
+\(see `egret--subtest-run-name'); the result is regexp-quoted so it
+can be embedded in a `-run' pattern."
+  (regexp-quote (egret--subtest-run-name name)))
+
+(defun egret--all-subtests-in-defun (defun-node)
+  "Return (POS . NAME) for every table-driven subtest inside DEFUN-NODE.
+Sorted by POS.  NAME is the raw, un-normalized subtest name text.
+Visits every `literal_value' node in DEFUN-NODE's subtree (see
+`treesit-search-subtree'); the predicate always returns nil so the
+traversal never stops early, and matches are collected as a
+side effect instead of via the search's own return value."
+  (let (result)
+    (treesit-search-subtree
+     defun-node
+     (lambda (node)
+       (when (string= (treesit-node-type node) "literal_value")
+         (catch 'egret--matched
+           (dolist (child (treesit-node-children node))
+             (when (string= (treesit-node-type child) "keyed_element")
+               (when (equal (egret--keyed-element-key-text child)
+                            egret-subtest-field-name)
+                 (let* ((value-node (treesit-node-child-by-field-name child "value"))
+                        (value (and value-node
+                                    (egret--go-string-literal-value value-node))))
+                   (when value
+                     (push (cons (treesit-node-start node) value) result)
+                     (throw 'egret--matched t))))))))
+       nil)
+     t)
+    (sort result (lambda (a b) (< (car a) (car b))))))
+
+(defun egret--current-subtest-index (subtests pos)
+  "Return the 0-based index of the last SUBTESTS entry at or before POS.
+SUBTESTS is a list as returned by `egret--all-subtests-in-defun'.
+Returns nil if POS is before every entry."
+  (let (found (i 0))
+    (dolist (entry subtests found)
+      (when (>= pos (car entry))
+        (setq found i))
+      (setq i (1+ i)))))
 
 (defun egret--run-pattern-at-point (&optional pos)
   "Return a `go test -run' pattern string for the context at POS.
@@ -554,6 +596,88 @@ opens it with `browse-url-of-file'."
       (if (zerop exit)
           (browse-url-of-file html)
         (user-error "Egret: `go tool cover' failed (exit %d)" exit)))))
+
+;;;###autoload
+(defun egret-show-info ()
+  "Show the test/subtest/suite context egret detects at point."
+  (interactive)
+  (let ((subtest (egret--subtest-name-at-point))
+        (func (egret--test-function-name-at-point))
+        (suite (egret--suite-method-info-at-point)))
+    (cond
+     (suite
+      (message "Egret: suite method %s (run via %s)" (cdr suite) (car suite)))
+     ((and func subtest)
+      (message "Egret: test %s, subtest %S" func subtest))
+     (func
+      (message "Egret: test %s" func))
+     (t
+      (message "Egret: not inside a test function")))))
+
+;;;###autoload
+(defun egret-next-subtest ()
+  "Move point to the next table-driven subtest in the enclosing test.
+Wraps around to the first subtest past the last one."
+  (interactive)
+  (let ((node (egret--enclosing-defun-node)))
+    (unless (and node (string= (treesit-node-type node) "function_declaration"))
+      (user-error "Egret: not inside a test function"))
+    (let ((subtests (egret--all-subtests-in-defun node)))
+      (unless subtests
+        (user-error "Egret: no subtests found in this test function"))
+      (let* ((current (egret--current-subtest-index subtests (point)))
+             (next (cond ((null current) 0)
+                         ((>= current (1- (length subtests))) 0)
+                         (t (1+ current))))
+             (entry (nth next subtests)))
+        (goto-char (car entry))
+        (message "Egret: subtest %S (%d/%d)"
+                 (cdr entry) (1+ next) (length subtests))))))
+
+;;;###autoload
+(defun egret-prev-subtest ()
+  "Move point to the previous table-driven subtest in the enclosing test.
+Wraps around to the last subtest before the first one."
+  (interactive)
+  (let ((node (egret--enclosing-defun-node)))
+    (unless (and node (string= (treesit-node-type node) "function_declaration"))
+      (user-error "Egret: not inside a test function"))
+    (let ((subtests (egret--all-subtests-in-defun node)))
+      (unless subtests
+        (user-error "Egret: no subtests found in this test function"))
+      (let* ((current (egret--current-subtest-index subtests (point)))
+             (prev (cond ((null current) (1- (length subtests)))
+                         ((<= current 0) (1- (length subtests)))
+                         (t (1- current))))
+             (entry (nth prev subtests)))
+        (goto-char (car entry))
+        (message "Egret: subtest %S (%d/%d)"
+                 (cdr entry) (1+ prev) (length subtests))))))
+
+(defun egret--imenu-create-index ()
+  "Create an imenu index of test functions and their subtests.
+Subtest entries are named \"TestName::subtest_name\"."
+  (let (index)
+    (dolist (node (treesit-node-children (treesit-buffer-root-node) t))
+      (when (string= (treesit-node-type node) "function_declaration")
+        (let ((name (egret--defun-node-name node)))
+          (when (and name (string-prefix-p "Test" name))
+            (push (cons name (treesit-node-start node)) index)
+            (dolist (entry (egret--all-subtests-in-defun node))
+              (push (cons (format "%s::%s" name (egret--subtest-run-name (cdr entry)))
+                          (car entry))
+                    index))))))
+    (nreverse index)))
+
+;;;###autoload
+(defun egret-imenu-index ()
+  "Enable imenu support for tests and subtests in the current buffer.
+Sets `imenu-create-index-function' buffer-locally to
+`egret--imenu-create-index'.  Call this interactively, or add it to
+`go-ts-mode-hook'."
+  (interactive)
+  (setq-local imenu-create-index-function #'egret--imenu-create-index)
+  (setq-local imenu-auto-rescan t))
 
 ;;; Minor mode
 
