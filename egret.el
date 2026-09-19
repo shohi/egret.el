@@ -392,22 +392,31 @@ PROCESS and EVENT are as passed to any process sentinel."
   (when (equal event "finished\n")
     (message "Egret: test run finished.")))
 
-(defun egret--start (command)
-  "Start COMMAND, a complete shell command, in `egret--buffer-name'."
+(defun egret--start (command &optional on-success)
+  "Start COMMAND, a complete shell command, in `egret--buffer-name'.
+ON-SUCCESS, if non-nil, is called with no arguments after the process
+finishes with exit code 0 (i.e. on the `compilation-mode' \"finished\\n\"
+event), after `egret--finished-sentinel' has run."
   (setq egret-last-command command)
   (egret--cleanup egret--buffer-name)
   (compilation-start command 'egret-compilation-mode
                       (lambda (_mode-name) egret--buffer-name))
-  (set-process-sentinel (get-buffer-process egret--buffer-name)
-                         #'egret--finished-sentinel))
+  (set-process-sentinel
+   (get-buffer-process egret--buffer-name)
+   (lambda (process event)
+     (egret--finished-sentinel process event)
+     (when (and on-success (equal event "finished\n"))
+       (funcall on-success)))))
 
-(defun egret--run-args (args)
-  "Run `go test' with raw ARGS (see `egret--build-command-from-args')."
-  (egret--start (egret--build-command-from-args args)))
+(defun egret--run-args (args &optional on-success)
+  "Run `go test' with raw ARGS (see `egret--build-command-from-args').
+ON-SUCCESS is as in `egret--start'."
+  (egret--start (egret--build-command-from-args args) on-success))
 
-(defun egret--run (pattern)
-  "Run `go test' for -run PATTERN in `egret--buffer-name'."
-  (egret--run-args (format "-run '%s' ." pattern)))
+(defun egret--run (pattern &optional on-success)
+  "Run `go test' for -run PATTERN in `egret--buffer-name'.
+ON-SUCCESS is as in `egret--start'."
+  (egret--run-args (format "-run '%s' ." pattern) on-success))
 
 (defun egret--file-function-names (prefix)
   "Return top-level function names in the current buffer starting with PREFIX.
@@ -480,6 +489,74 @@ Relative to `default-directory' unless given as an absolute path."
 
 (defvar egret--last-coverage-file nil
   "Absolute path of the most recent coverage profile `egret-coverage' wrote.")
+
+(defface egret-coverage-covered-face
+  '((t :inherit diff-added))
+  "Face for source lines a coverage profile marks as covered."
+  :group 'egret)
+
+(defface egret-coverage-uncovered-face
+  '((t :inherit diff-removed))
+  "Face for source lines a coverage profile marks as not covered."
+  :group 'egret)
+
+(defvar-local egret--coverage-overlays nil
+  "Overlays created by `egret-coverage-overlay-show' in this buffer.")
+
+(defun egret--coverage-clear-overlays ()
+  "Delete all overlays in `egret--coverage-overlays' and reset it."
+  (mapc #'delete-overlay egret--coverage-overlays)
+  (setq egret--coverage-overlays nil))
+
+(defun egret--coverage-profile-file-key ()
+  "Return the key a `go tool cover' profile uses for this buffer's file.
+This is the file's Go import path plus its base name, e.g.
+\"example.com/mod/pkg/file.go\", computed via `go list'.  Returns nil
+if variable `buffer-file-name' is unset or `go list' fails."
+  (when buffer-file-name
+    (let* ((default-directory (file-name-directory buffer-file-name))
+           (import-path (string-trim
+                         (shell-command-to-string "go list -f '{{.ImportPath}}' ."))))
+      (unless (or (string-empty-p import-path)
+                  (string-search "\n" import-path)
+                  (string-prefix-p "go:" import-path))
+        (concat import-path "/" (file-name-nondirectory buffer-file-name))))))
+
+(defun egret--parse-coverage-profile (profile-file file-key)
+  "Return coverage blocks for FILE-KEY from PROFILE-FILE.
+Each block is a list (START-LINE START-COL END-LINE END-COL COUNT),
+1-based, as written by `go tool cover'."
+  (let ((line-re (concat "\\`" (regexp-quote file-key)
+                          ":\\([0-9]+\\)\\.\\([0-9]+\\),"
+                          "\\([0-9]+\\)\\.\\([0-9]+\\) [0-9]+ \\([0-9]+\\)\\'"))
+        blocks)
+    (with-temp-buffer
+      (insert-file-contents profile-file)
+      (goto-char (point-min))
+      (forward-line 1) ; skip the "mode: ..." header line
+      (while (not (eobp))
+        (let ((line (buffer-substring-no-properties
+                     (line-beginning-position) (line-end-position))))
+          (when (string-match line-re line)
+            (push (list (string-to-number (match-string 1 line))
+                        (string-to-number (match-string 2 line))
+                        (string-to-number (match-string 3 line))
+                        (string-to-number (match-string 4 line))
+                        (string-to-number (match-string 5 line)))
+                  blocks)))
+        (forward-line 1)))
+    (nreverse blocks)))
+
+(defun egret--coverage-line-col-pos (line col)
+  "Return the buffer position at 1-based LINE and COL.
+COL is a raw character offset from the start of LINE (as `go tool
+cover' reports it, counting every byte/rune, not a display column
+that expands tabs), clamped to LINE's end.  Never modifies the
+buffer, unlike `move-to-column' with FORCE."
+  (save-excursion
+    (goto-char (point-min))
+    (forward-line (1- line))
+    (min (+ (point) (1- col)) (line-end-position))))
 
 ;;; Commands
 
@@ -596,12 +673,71 @@ benchmarks there is no file- or project-wide fuzz command."
 (defun egret-coverage ()
   "Run `go test' with coverage for the current package.
 Writes the profile to `egret-coverage-file' (via `--coverprofile'),
-under `default-directory'.  Use `egret-coverage-show-html' afterwards
-to view it."
+under `default-directory'.  If the run succeeds, automatically
+highlights covered/uncovered lines in this buffer via
+`egret-coverage-overlay-show' (silently, if this file has no coverage
+data of its own).  Use `egret-coverage-show-html' for a whole-project
+HTML view instead."
   (interactive)
-  (let ((file (expand-file-name egret-coverage-file)))
+  (let ((file (expand-file-name egret-coverage-file))
+        (buf (current-buffer)))
     (setq egret--last-coverage-file file)
-    (egret--run-args (format "--coverprofile=%s ." (shell-quote-argument file)))))
+    (egret--run-args
+     (format "--coverprofile=%s ." (shell-quote-argument file))
+     (lambda ()
+       (when (buffer-live-p buf)
+         (with-current-buffer buf
+           (when (derived-mode-p 'go-ts-mode)
+             (ignore-errors (egret-coverage-overlay-show)))))))))
+
+;;;###autoload
+(defun egret-coverage-overlay-show (&optional profile-file)
+  "Highlight covered/uncovered lines in the current buffer.
+Reads PROFILE-FILE (default: `egret--last-coverage-file', falling
+back to `egret-coverage-file' under `default-directory') and
+overlays each line range it covers with
+`egret-coverage-covered-face' or `egret-coverage-uncovered-face'.
+Replaces any overlays a previous call left in this buffer."
+  (interactive)
+  (let ((profile (or profile-file egret--last-coverage-file
+                      (expand-file-name egret-coverage-file))))
+    (unless (file-exists-p profile)
+      (user-error "Egret: no coverage profile found at %s" profile))
+    (let ((key (egret--coverage-profile-file-key)))
+      (unless key
+        (user-error "Egret: could not determine this file's package import path"))
+      (let ((blocks (egret--parse-coverage-profile profile key)))
+        (unless blocks
+          (user-error "Egret: no coverage data for this file in %s" profile))
+        (egret--coverage-clear-overlays)
+        (dolist (block blocks)
+          (let* ((start (egret--coverage-line-col-pos (nth 0 block) (nth 1 block)))
+                 (end (egret--coverage-line-col-pos (nth 2 block) (nth 3 block)))
+                 (count (nth 4 block))
+                 (ov (make-overlay start end)))
+            (overlay-put ov 'face (if (> count 0)
+                                      'egret-coverage-covered-face
+                                    'egret-coverage-uncovered-face))
+            (overlay-put ov 'evaporate t)
+            (push ov egret--coverage-overlays)))
+        (message "Egret: coverage shown (%d blocks)" (length blocks))))))
+
+;;;###autoload
+(defun egret-coverage-overlay-clear ()
+  "Remove coverage overlays `egret-coverage-overlay-show' added here."
+  (interactive)
+  (egret--coverage-clear-overlays)
+  (message "Egret: coverage overlays cleared"))
+
+;;;###autoload
+(define-minor-mode egret-coverage-overlay-mode
+  "Toggle inline coverage highlighting in the current buffer.
+Enabling calls `egret-coverage-overlay-show'; disabling clears it."
+  :lighter " Cov"
+  :group 'egret
+  (if egret-coverage-overlay-mode
+      (egret-coverage-overlay-show)
+    (egret-coverage-overlay-clear)))
 
 ;;;###autoload
 (defun egret-coverage-show-html ()

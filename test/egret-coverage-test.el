@@ -18,7 +18,7 @@
   (declare (indent 1))
   `(let (,captured-var)
      (cl-letf (((symbol-function 'egret--start)
-                (lambda (command) (setq ,captured-var command))))
+                (lambda (command &optional _on-success) (setq ,captured-var command))))
        ,@body)
      ,captured-var))
 

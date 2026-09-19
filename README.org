@@ -57,10 +57,17 @@ file- or project-wide fuzz command.
 
 *** Coverage
 
-| Command                    | Does                                                    |
-|------------------------------+------------------------------------------------------------|
-| =egret-coverage=             | Runs the current package with =--coverprofile=          |
-| =egret-coverage-show-html=   | Generates and opens an HTML report for that profile     |
+| Command                        | Does                                                     |
+|-----------------------------------+-------------------------------------------------------------|
+| =egret-coverage=                 | Runs the current package with =--coverprofile=; on success, automatically highlights this buffer via =egret-coverage-overlay-show= |
+| =egret-coverage-overlay-show=    | Highlight covered/uncovered lines in the current buffer, from the most recent profile |
+| =egret-coverage-overlay-clear=   | Remove those overlays                                    |
+| =egret-coverage-overlay-mode=    | Minor-mode toggle for the above (enable = show, disable = clear) |
+| =egret-coverage-show-html=       | Generates and opens a whole-project HTML report instead  |
+
+Coverage matching works by resolving the buffer's Go import path via
+=go list=, so it only lights up files that have coverage data of their
+own (not =_test.go= files themselves, for example).
 
 *** Navigation
 
@@ -118,6 +125,8 @@ design (less common); use =M-x=.
 | =egret-fuzz-args=            | =nil=         | Extra args for =-fuzz= runs                     |
 | =egret-coverage-file=        | ="cover.out"= | Coverage profile file name                      |
 | =egret-compilation-error-regexp-alist= | stdlib/testify/panic/compiler/linker | Patterns used for =next-error= in the output buffer |
+| =egret-coverage-covered-face=    | inherits =diff-added=   | Face for covered lines |
+| =egret-coverage-uncovered-face=  | inherits =diff-removed= | Face for uncovered lines |
 
 ** Acknowledgements
 
