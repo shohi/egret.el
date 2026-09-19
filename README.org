@@ -40,6 +40,8 @@ is (or derives from) =go-ts-mode=; it does nothing to other buffers.
 =egret-dwim= is the main entry point: put point on a =TestFoo= function,
 inside a table-driven subtest's =\{name: "...", ...\}= entry, or inside a
 testify =func (s *FooSuite) TestBar()= method, and it runs exactly that.
+With an active region, it instead runs every top-level test function
+the region covers.
 
 *** Benchmarks and fuzzing
 
@@ -116,11 +118,6 @@ design (less common); use =M-x=.
 | =egret-fuzz-args=            | =nil=         | Extra args for =-fuzz= runs                     |
 | =egret-coverage-file=        | ="cover.out"= | Coverage profile file name                      |
 | =egret-compilation-error-regexp-alist= | stdlib/testify/panic/compiler/linker | Patterns used for =next-error= in the output buffer |
-
-** Known limitations
-
-- =egret-dwim= does not yet run every test covered by an active region
-  (an old =gotest.el= behavior); it only ever targets the test at point.
 
 ** Acknowledgements
 

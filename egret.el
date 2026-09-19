@@ -429,6 +429,21 @@ included like any other test function."
 \(see `egret--file-function-names')."
   (egret--file-function-names "Test"))
 
+(defun egret--functions-in-range (start end &optional prefix)
+  "Return top-level PREFIX-prefixed function names overlapping START..END.
+PREFIX defaults to \"Test\".  Names are returned in source order.
+Used to run every test covered by an active region."
+  (let ((prefix (or prefix "Test")))
+    (delq nil
+          (mapcar (lambda (node)
+                    (when (string= (treesit-node-type node) "function_declaration")
+                      (when (and (< start (treesit-node-end node))
+                                 (< (treesit-node-start node) end))
+                        (let ((name (egret--defun-node-name node)))
+                          (when (and name (string-prefix-p prefix name))
+                            name)))))
+                  (treesit-node-children (treesit-buffer-root-node) t)))))
+
 (defun egret--project-packages ()
   "Return the list of package import paths in the current Go module.
 Uses `go list ./...' relative to `default-directory', excluding
@@ -471,10 +486,18 @@ Relative to `default-directory' unless given as an absolute path."
 ;;;###autoload
 (defun egret-dwim ()
   "Run the test, table-driven subtest, or suite method at point.
-Detects, in order of precedence, a table-driven subtest, a testify
-suite method, or a plain test function, then runs `go test' for it."
+If a region is active, instead run every top-level test function it
+covers (ignoring subtest/suite context, since a region spans whole
+functions).  Otherwise, detects, in order of precedence, a
+table-driven subtest, a testify suite method, or a plain test
+function, then runs `go test' for it."
   (interactive)
-  (egret--run (egret--run-pattern-at-point)))
+  (if (use-region-p)
+      (let ((names (egret--functions-in-range (region-beginning) (region-end))))
+        (unless names
+          (user-error "Egret: no test functions found in the selected region"))
+        (egret--run (mapconcat (lambda (name) (format "^%s$" name)) names "|")))
+    (egret--run (egret--run-pattern-at-point))))
 
 ;;;###autoload
 (defun egret-run-function ()
