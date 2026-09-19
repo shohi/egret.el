@@ -302,16 +302,22 @@ HISTORY for completion)."
     ((or '- '(16)) (car (symbol-value history)))
     ((or '(4) '(64)) (read-shell-command "go test args: " defaults history))))
 
-(defun egret--build-command (pattern)
-  "Return the full `go test' shell command for -run PATTERN.
+(defun egret--build-command-from-args (args)
+  "Return the full `go test' shell command for raw ARGS.
+ARGS is a complete `go test' argument string, such as a -run pattern
+target (\".\"), a bare \".\", or package paths joined by spaces.
 Honors `egret-test-args', `egret-verbose', and `current-prefix-arg'
 \(see `egret--get-arguments')."
-  (let ((args (format "-run '%s' ." pattern)))
-    (when egret-test-args
-      (setq args (concat egret-test-args " " args)))
-    (when egret-verbose
-      (setq args (concat "-v " args)))
-    (concat "go test " (egret--get-arguments args 'egret-history))))
+  (when egret-test-args
+    (setq args (concat egret-test-args " " args)))
+  (when egret-verbose
+    (setq args (concat "-v " args)))
+  (concat "go test " (egret--get-arguments args 'egret-history)))
+
+(defun egret--build-command (pattern)
+  "Return the full `go test' shell command for -run PATTERN.
+\(see `egret--build-command-from-args')."
+  (egret--build-command-from-args (format "-run '%s' ." pattern)))
 
 (defun egret--cleanup (buffer-name)
   "Delete any live process in BUFFER-NAME and erase it."
@@ -329,15 +335,44 @@ PROCESS and EVENT are as passed to any process sentinel."
   (when (equal event "finished\n")
     (message "Egret: test run finished.")))
 
+(defun egret--start (command)
+  "Start COMMAND, a complete shell command, in `egret--buffer-name'."
+  (setq egret-last-command command)
+  (egret--cleanup egret--buffer-name)
+  (compilation-start command 'egret-compilation-mode
+                      (lambda (_mode-name) egret--buffer-name))
+  (set-process-sentinel (get-buffer-process egret--buffer-name)
+                         #'egret--finished-sentinel))
+
+(defun egret--run-args (args)
+  "Run `go test' with raw ARGS (see `egret--build-command-from-args')."
+  (egret--start (egret--build-command-from-args args)))
+
 (defun egret--run (pattern)
   "Run `go test' for -run PATTERN in `egret--buffer-name'."
-  (let ((command (egret--build-command pattern)))
-    (setq egret-last-command command)
-    (egret--cleanup egret--buffer-name)
-    (compilation-start command 'egret-compilation-mode
-                        (lambda (_mode-name) egret--buffer-name))
-    (set-process-sentinel (get-buffer-process egret--buffer-name)
-                           #'egret--finished-sentinel)))
+  (egret--run-args (format "-run '%s' ." pattern)))
+
+(defun egret--file-test-names ()
+  "Return top-level Test* function names in the current buffer.
+Names are returned in source order.  Only plain `function_declaration'
+nodes are considered, so testify suite methods (which are
+`method_declaration' nodes, and are not runnable via `-run' on their
+own) are excluded; a suite's top-level TestXxx entry function is
+included like any other test function."
+  (delq nil
+        (mapcar (lambda (node)
+                  (when (string= (treesit-node-type node) "function_declaration")
+                    (let ((name (egret--defun-node-name node)))
+                      (when (and name (string-prefix-p "Test" name))
+                        name))))
+                (treesit-node-children (treesit-buffer-root-node) t))))
+
+(defun egret--project-packages ()
+  "Return the list of package import paths in the current Go module.
+Uses `go list ./...' relative to `default-directory', excluding
+vendored packages."
+  (seq-remove (lambda (s) (string-match-p "/vendor/" s))
+              (split-string (shell-command-to-string "go list ./...") "\n" t)))
 
 ;;; Commands
 
@@ -356,6 +391,41 @@ Like `egret-dwim', but always targets the whole enclosing test,
 ignoring any subtest context."
   (interactive)
   (egret--run (egret--enclosing-run-target-at-point)))
+
+;;;###autoload
+(defun egret-run-file ()
+  "Run every top-level test function declared in the current file."
+  (interactive)
+  (let ((names (egret--file-test-names)))
+    (unless names
+      (user-error "Egret: no test functions found in this file"))
+    (egret--run (mapconcat (lambda (name) (format "^%s$" name)) names "|"))))
+
+;;;###autoload
+(defun egret-run-package ()
+  "Run all tests in the current package (this file's directory)."
+  (interactive)
+  (egret--run-args "."))
+
+;;;###autoload
+(defun egret-run-project ()
+  "Run tests for every package in the current Go module."
+  (interactive)
+  (let ((packages (egret--project-packages)))
+    (unless packages
+      (user-error "Egret: no packages found (not in a Go module?)"))
+    (egret--run-args (string-join packages " "))))
+
+;;;###autoload
+(defun egret-run-last ()
+  "Re-run the most recent `go test' command egret started.
+Note: the egret test buffer is a `compilation-mode' buffer, so
+pressing \\`g' (`revert-buffer') in it re-runs the same command too;
+this command is for invoking a re-run from elsewhere."
+  (interactive)
+  (unless egret-last-command
+    (user-error "Egret: no previous test run"))
+  (egret--start egret-last-command))
 
 ;;; Minor mode
 
