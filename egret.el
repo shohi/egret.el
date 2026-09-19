@@ -28,15 +28,21 @@
 ;; (or the equivalent local plan, if present) for the full design and
 ;; phased build order.
 ;;
-;; This file currently implements the tree-sitter detection core: given
-;; point in a `go-ts-mode' buffer, work out which `go test -run' pattern
-;; corresponds to the enclosing test function, table-driven subtest, or
-;; testify-style suite method.  Actual test execution lands in a later
-;; phase; for now `egret-dwim' and `egret-run-function' only report the
-;; pattern they would use.
+;; Given point in a `go-ts-mode' buffer, egret works out which `go test
+;; -run' pattern corresponds to the enclosing test function, table-driven
+;; subtest, or testify-style suite method (the detection layer), then
+;; runs `go test' for that pattern in a dedicated compilation buffer
+;; (the execution layer):
+;;
+;;   M-x egret-dwim            ; run the test/subtest/suite-method at point
+;;   M-x egret-run-function    ; run the whole enclosing test, ignore subtest
+;;
+;; `egret-mode' is a minor mode; enabling it is not yet required to use
+;; the commands above (keymap/hook wiring lands in a later phase).
 
 ;;; Code:
 
+(require 'compile)
 (require 'treesit)
 (require 'subr-x)
 (require 'pcase)
@@ -189,28 +195,167 @@ enclosing test function or suite entry, ignoring any subtest context."
       (format "^%s$" (egret--test-function-name-at-point pos)))
      (t (user-error "Egret: not inside a test function")))))
 
+;;; Execution (private)
+
+(defcustom egret-test-args nil
+  "Extra arguments to pass to every `go test' invocation."
+  :type '(choice (const :tag "None" nil) string)
+  :group 'egret)
+
+(defcustom egret-verbose nil
+  "Non-nil to always pass -v to `go test'."
+  :type 'boolean
+  :group 'egret)
+
+(defvar egret-history nil
+  "History list for `go test' command arguments.")
+
+(defvar egret-last-command nil
+  "Last `go test' shell command egret ran.")
+
+(defconst egret--buffer-name "*Egret Test*"
+  "Name of egret's dedicated test-output buffer.")
+
+(defface egret-ok-face
+  '((t (:foreground "#00ff00")))
+  "Face for passing test output lines."
+  :group 'egret)
+
+(defface egret-error-face
+  '((t (:foreground "#ff0000")))
+  "Face for failing test output lines."
+  :group 'egret)
+
+(defface egret-warning-face
+  '((t (:foreground "#eeee00")))
+  "Face for warning test output lines."
+  :group 'egret)
+
+(defface egret-pointer-face
+  '((t (:foreground "#ff00ff")))
+  "Face for the `^~~~' pointer lines under a failing assertion."
+  :group 'egret)
+
+(defface egret-standard-face
+  '((t (:foreground "#ffa500")))
+  "Face for informational test output lines."
+  :group 'egret)
+
+(defconst egret-font-lock-keywords
+  '(("error\\:" . 'egret-error-face)
+    ("testing: warning:.*" . 'egret-warning-face)
+    ("^\s*\\^\\~*\s*$" . 'egret-pointer-face)
+    ("^\s*Compilation.*" . 'egret-standard-face)
+    ("^\s*go test.*" . 'egret-standard-face)
+    (".*undefined.*" . 'egret-warning-face)
+    ("^\s*FAIL.*" . 'egret-error-face)
+    ("^\s*--- FAIL:.*" . 'egret-error-face)
+    ("^\s*=== RUN.*" . 'egret-ok-face)
+    ("^\s*--- PASS.*" . 'egret-ok-face)
+    ("^\s*PASS.*" . 'egret-ok-face)
+    ("^\s*ok.*" . 'egret-ok-face))
+  "Minimal highlighting expressions for `egret-compilation-mode'.")
+
+(defvar egret-compilation-error-regexp-alist-alist
+  '((egret-testing . ("^\t\\([[:alnum:]-_/.]+\\.go\\):\\([0-9]+\\): .*$" 1 2))
+    (egret-testify . ("^\tLocation:\t\\([[:alnum:]-_/.]+\\.go\\):\\([0-9]+\\)$" 1 2))
+    (egret-gopanic . ("^\t\\([[:alnum:]-_/.]+\\.go\\):\\([0-9]+\\) \\+0x\\(?:[0-9a-f]+\\)" 1 2))
+    (egret-compile . ("^\\([[:alnum:]-_/.]+\\.go\\):\\([0-9]+\\):\\(?:\\([0-9]+\\):\\)? .*$" 1 2 3))
+    (egret-linkage . ("^\\([[:alnum:]-_/.]+\\.go\\):\\([0-9]+\\): undefined: .*$" 1 2)))
+  "Alist of values for `egret-compilation-error-regexp-alist'.
+See also `compilation-error-regexp-alist-alist'.")
+
+(defcustom egret-compilation-error-regexp-alist
+  '(egret-testing egret-testify egret-gopanic egret-compile egret-linkage)
+  "Specifies how `next-error' matches errors in `go test' output.
+Covers stdlib `testing' failures, `testify' assertion locations,
+panics, compiler errors, and linker errors.  See also
+`compilation-error-regexp-alist'."
+  :type '(repeat (choice (symbol :tag "Predefined symbol")
+                          (sexp :tag "Error specification")))
+  :group 'egret)
+
+(defvar egret-compilation-mode-map
+  (let ((map (make-sparse-keymap)))
+    (set-keymap-parent map compilation-mode-map)
+    map)
+  "Keymap for `egret-compilation-mode'.")
+
+(define-derived-mode egret-compilation-mode compilation-mode "Egret-Test"
+  "Major mode for egret's `go test' output buffer."
+  (setq-local truncate-lines t)
+  (setq-local compilation-error-regexp-alist-alist
+              egret-compilation-error-regexp-alist-alist)
+  (setq-local compilation-error-regexp-alist
+              egret-compilation-error-regexp-alist)
+  (font-lock-add-keywords nil egret-font-lock-keywords))
+
+(defun egret--get-arguments (defaults history)
+  "Resolve `go test' arguments, honoring `current-prefix-arg'.
+DEFAULTS is used with no prefix argument.  A numeric prefix injects a
+`-count=N' flag.  `C-u -' or a double prefix reuses the most recent
+HISTORY entry.  A single or triple prefix prompts for arguments (using
+HISTORY for completion)."
+  (pcase current-prefix-arg
+    ('nil defaults)
+    ((pred integerp) (format "-count=%d %s" current-prefix-arg defaults))
+    ((or '- '(16)) (car (symbol-value history)))
+    ((or '(4) '(64)) (read-shell-command "go test args: " defaults history))))
+
+(defun egret--build-command (pattern)
+  "Return the full `go test' shell command for -run PATTERN.
+Honors `egret-test-args', `egret-verbose', and `current-prefix-arg'
+\(see `egret--get-arguments')."
+  (let ((args (format "-run '%s' ." pattern)))
+    (when egret-test-args
+      (setq args (concat egret-test-args " " args)))
+    (when egret-verbose
+      (setq args (concat "-v " args)))
+    (concat "go test " (egret--get-arguments args 'egret-history))))
+
+(defun egret--cleanup (buffer-name)
+  "Delete any live process in BUFFER-NAME and erase it."
+  (when (get-buffer buffer-name)
+    (when (get-buffer-process buffer-name)
+      (delete-process buffer-name))
+    (with-current-buffer buffer-name
+      (let ((inhibit-read-only t))
+        (erase-buffer)))))
+
+(defun egret--finished-sentinel (process event)
+  "Run `compilation-sentinel', then report completion.
+PROCESS and EVENT are as passed to any process sentinel."
+  (compilation-sentinel process event)
+  (when (equal event "finished\n")
+    (message "Egret: test run finished.")))
+
+(defun egret--run (pattern)
+  "Run `go test' for -run PATTERN in `egret--buffer-name'."
+  (let ((command (egret--build-command pattern)))
+    (setq egret-last-command command)
+    (egret--cleanup egret--buffer-name)
+    (compilation-start command 'egret-compilation-mode
+                        (lambda (_mode-name) egret--buffer-name))
+    (set-process-sentinel (get-buffer-process egret--buffer-name)
+                           #'egret--finished-sentinel)))
+
 ;;; Commands
 
 ;;;###autoload
 (defun egret-dwim ()
-  "Report the `go test -run' pattern egret would use at point.
+  "Run the test, table-driven subtest, or suite method at point.
 Detects, in order of precedence, a table-driven subtest, a testify
-suite method, or a plain test function.  Actual execution lands in a
-later phase; for now this only reports what would run."
+suite method, or a plain test function, then runs `go test' for it."
   (interactive)
-  (let ((pattern (egret--run-pattern-at-point)))
-    (message "egret: go test -run '%s'" pattern)
-    pattern))
+  (egret--run (egret--run-pattern-at-point)))
 
 ;;;###autoload
 (defun egret-run-function ()
-  "Report the `go test -run' pattern for the whole test at point.
-Like `egret-dwim', but always targets the whole enclosing test
-function or suite entry, ignoring any subtest context."
+  "Run the whole enclosing test function or suite entry at point.
+Like `egret-dwim', but always targets the whole enclosing test,
+ignoring any subtest context."
   (interactive)
-  (let ((pattern (egret--enclosing-run-target-at-point)))
-    (message "egret: go test -run '%s'" pattern)
-    pattern))
+  (egret--run (egret--enclosing-run-target-at-point)))
 
 ;;; Minor mode
 
