@@ -90,16 +90,31 @@ Strips pointer indirection, e.g. a receiver of `*FooSuite' returns
         (let ((type-node (treesit-search-subtree receiver-node "type_identifier")))
           (when type-node (treesit-node-text type-node t)))))))
 
+(defun egret--prefixed-function-name-at-point (prefix &optional pos)
+  "Return the enclosing plain Go function name at POS starting with PREFIX.
+Return nil if none does.  Only matches `function_declaration' nodes
+\(not `method_declaration'; see `egret--suite-method-info-at-point'
+for those)."
+  (let ((node (egret--enclosing-defun-node pos)))
+    (when (and node (string= (treesit-node-type node) "function_declaration"))
+      (let ((name (egret--defun-node-name node)))
+        (when (and name (string-prefix-p prefix name))
+          name)))))
+
 (defun egret--test-function-name-at-point (&optional pos)
   "Return the enclosing Go test function name at POS, or nil.
 Only matches plain `function_declaration' nodes whose name starts
 with \"Test\".  Suite methods are handled separately by
 `egret--suite-method-info-at-point'."
-  (let ((node (egret--enclosing-defun-node pos)))
-    (when (and node (string= (treesit-node-type node) "function_declaration"))
-      (let ((name (egret--defun-node-name node)))
-        (when (and name (string-prefix-p "Test" name))
-          name)))))
+  (egret--prefixed-function-name-at-point "Test" pos))
+
+(defun egret--benchmark-name-at-point (&optional pos)
+  "Return the enclosing Go benchmark function name at POS, or nil."
+  (egret--prefixed-function-name-at-point "Benchmark" pos))
+
+(defun egret--fuzz-name-at-point (&optional pos)
+  "Return the enclosing Go fuzz target function name at POS, or nil."
+  (egret--prefixed-function-name-at-point "Fuzz" pos))
 
 (defun egret--suite-method-info-at-point (&optional pos)
   "Return (ENTRY . METHOD) for a testify-style suite method at POS.
@@ -352,8 +367,8 @@ PROCESS and EVENT are as passed to any process sentinel."
   "Run `go test' for -run PATTERN in `egret--buffer-name'."
   (egret--run-args (format "-run '%s' ." pattern)))
 
-(defun egret--file-test-names ()
-  "Return top-level Test* function names in the current buffer.
+(defun egret--file-function-names (prefix)
+  "Return top-level function names in the current buffer starting with PREFIX.
 Names are returned in source order.  Only plain `function_declaration'
 nodes are considered, so testify suite methods (which are
 `method_declaration' nodes, and are not runnable via `-run' on their
@@ -363,9 +378,14 @@ included like any other test function."
         (mapcar (lambda (node)
                   (when (string= (treesit-node-type node) "function_declaration")
                     (let ((name (egret--defun-node-name node)))
-                      (when (and name (string-prefix-p "Test" name))
+                      (when (and name (string-prefix-p prefix name))
                         name))))
                 (treesit-node-children (treesit-buffer-root-node) t))))
+
+(defun egret--file-test-names ()
+  "Return top-level Test* function names in the current buffer.
+\(see `egret--file-function-names')."
+  (egret--file-function-names "Test"))
 
 (defun egret--project-packages ()
   "Return the list of package import paths in the current Go module.
@@ -373,6 +393,27 @@ Uses `go list ./...' relative to `default-directory', excluding
 vendored packages."
   (seq-remove (lambda (s) (string-match-p "/vendor/" s))
               (split-string (shell-command-to-string "go list ./...") "\n" t)))
+
+(defcustom egret-bench-args nil
+  "Extra arguments to pass to every `go test -bench' invocation."
+  :type '(choice (const :tag "None" nil) string)
+  :group 'egret)
+
+(defcustom egret-fuzz-args nil
+  "Extra arguments to pass to every `go test -fuzz' invocation."
+  :type '(choice (const :tag "None" nil) string)
+  :group 'egret)
+
+(defun egret--flagged-run-args (flag pattern extra-args)
+  "Return raw `go test' args to run FLAG on PATTERN.
+FLAG is \"-bench\" or \"-fuzz\".  Ordinary tests are disabled via
+\"-run=-\"; EXTRA-ARGS, if non-nil, is prepended to the arguments.
+PATTERN is single-quoted, matching `egret--build-command' -- a bare
+\"$\" anchor is otherwise misinterpreted by shells such as fish."
+  (let ((opts "-run=-"))
+    (when extra-args
+      (setq opts (concat extra-args " " opts)))
+    (concat opts " " flag " '" pattern "'")))
 
 ;;; Commands
 
@@ -426,6 +467,56 @@ this command is for invoking a re-run from elsewhere."
   (unless egret-last-command
     (user-error "Egret: no previous test run"))
   (egret--start egret-last-command))
+
+;;;###autoload
+(defun egret-run-benchmark ()
+  "Run the benchmark function at point.
+Ordinary tests are disabled for this run (\"-run=-\")."
+  (interactive)
+  (let ((name (egret--benchmark-name-at-point)))
+    (unless name
+      (user-error "Egret: not inside a benchmark function"))
+    (egret--run-args (egret--flagged-run-args
+                       "-bench" (format "^%s$" name) egret-bench-args))))
+
+;;;###autoload
+(defun egret-run-file-benchmarks ()
+  "Run every benchmark function declared in the current file.
+Ordinary tests are disabled for this run (\"-run=-\")."
+  (interactive)
+  (let ((names (egret--file-function-names "Benchmark")))
+    (unless names
+      (user-error "Egret: no benchmark functions found in this file"))
+    (egret--run-args
+     (egret--flagged-run-args
+      "-bench" (mapconcat (lambda (name) (format "^%s$" name)) names "|")
+      egret-bench-args))))
+
+;;;###autoload
+(defun egret-run-project-benchmarks ()
+  "Run every benchmark across every package in the current Go module.
+Ordinary tests are disabled for this run (\"-run=-\")."
+  (interactive)
+  (let ((packages (egret--project-packages)))
+    (unless packages
+      (user-error "Egret: no packages found (not in a Go module?)"))
+    (egret--run-args
+     (format "%s %s"
+             (egret--flagged-run-args "-bench" "." egret-bench-args)
+             (string-join packages " ")))))
+
+;;;###autoload
+(defun egret-run-fuzz ()
+  "Run the fuzz target at point.
+Ordinary tests are disabled for this run (\"-run=-\").  `go test'
+only supports fuzzing a single target per invocation, so unlike
+benchmarks there is no file- or project-wide fuzz command."
+  (interactive)
+  (let ((name (egret--fuzz-name-at-point)))
+    (unless name
+      (user-error "Egret: not inside a fuzz function"))
+    (egret--run-args (egret--flagged-run-args
+                       "-fuzz" (format "^%s$" name) egret-fuzz-args))))
 
 ;;; Minor mode
 
