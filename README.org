@@ -1,0 +1,3 @@
+* Egret
+
+Emacs interface of go test
