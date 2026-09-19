@@ -679,12 +679,57 @@ Sets `imenu-create-index-function' buffer-locally to
   (setq-local imenu-create-index-function #'egret--imenu-create-index)
   (setq-local imenu-auto-rescan t))
 
+;;;###autoload
+(defun egret-imenu-goto ()
+  "Jump to a test or subtest in the current buffer via `imenu'.
+Enables egret's imenu index (`egret-imenu-index') first if it is not
+already active."
+  (interactive)
+  (unless (eq imenu-create-index-function #'egret--imenu-create-index)
+    (egret-imenu-index))
+  (call-interactively #'imenu))
+
 ;;; Minor mode
+
+(defvar-keymap egret-mode-map
+  :doc "Keymap for `egret-mode'.
+Deliberately shadows built-in `go-ts-mode-map's C-c C-t t/f/p with
+egret's richer DWIM/scope equivalents; see the migration plan for the
+rationale.  egret-run-fuzz and egret-run-file-benchmarks have no
+binding by design (less common, M-x only)."
+  "C-c C-t t" #'egret-dwim
+  "C-c C-t T" #'egret-run-function
+  "C-c C-t f" #'egret-run-file
+  "C-c C-t p" #'egret-run-package
+  "C-c C-t P" #'egret-run-project
+  "C-c C-t l" #'egret-run-last
+  "C-c C-t b" #'egret-run-benchmark
+  "C-c C-t B" #'egret-run-project-benchmarks
+  "C-c C-t c" #'egret-coverage
+  "C-c C-t C" #'egret-coverage-show-html
+  "C-c C-t n" #'egret-next-subtest
+  "C-c C-t N" #'egret-prev-subtest
+  "C-c C-t m" #'egret-imenu-goto
+  "C-c C-t i" #'egret-show-info)
 
 ;;;###autoload
 (define-minor-mode egret-mode
   "Minor mode for running Go tests with tree-sitter."
   :lighter " Egret"
+  :keymap egret-mode-map
+  :group 'egret)
+
+(defun egret--maybe-enable ()
+  "Enable `egret-mode' if the current buffer is a `go-ts-mode' buffer.
+Uses `derived-mode-p' rather than `eq' against `major-mode', so any
+future mode derived from `go-ts-mode' is covered too.  Intended for
+`egret-global-mode'."
+  (when (derived-mode-p 'go-ts-mode)
+    (egret-mode 1)))
+
+;;;###autoload
+(define-globalized-minor-mode egret-global-mode egret-mode
+  egret--maybe-enable
   :group 'egret)
 
 (provide 'egret)
