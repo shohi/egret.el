@@ -415,6 +415,15 @@ PATTERN is single-quoted, matching `egret--build-command' -- a bare
       (setq opts (concat extra-args " " opts)))
     (concat opts " " flag " '" pattern "'")))
 
+(defcustom egret-coverage-file "cover.out"
+  "File name for the `go test' coverage profile.
+Relative to `default-directory' unless given as an absolute path."
+  :type 'string
+  :group 'egret)
+
+(defvar egret--last-coverage-file nil
+  "Absolute path of the most recent coverage profile `egret-coverage' wrote.")
+
 ;;; Commands
 
 ;;;###autoload
@@ -517,6 +526,34 @@ benchmarks there is no file- or project-wide fuzz command."
       (user-error "Egret: not inside a fuzz function"))
     (egret--run-args (egret--flagged-run-args
                        "-fuzz" (format "^%s$" name) egret-fuzz-args))))
+
+;;;###autoload
+(defun egret-coverage ()
+  "Run `go test' with coverage for the current package.
+Writes the profile to `egret-coverage-file' (via `--coverprofile'),
+under `default-directory'.  Use `egret-coverage-show-html' afterwards
+to view it."
+  (interactive)
+  (let ((file (expand-file-name egret-coverage-file)))
+    (setq egret--last-coverage-file file)
+    (egret--run-args (format "--coverprofile=%s ." (shell-quote-argument file)))))
+
+;;;###autoload
+(defun egret-coverage-show-html ()
+  "Open an HTML report for the most recent `egret-coverage' profile.
+Generates it via \"go tool cover -html\" next to the profile, then
+opens it with `browse-url-of-file'."
+  (interactive)
+  (let* ((profile (or egret--last-coverage-file (expand-file-name egret-coverage-file))))
+    (unless (file-exists-p profile)
+      (user-error "Egret: no coverage profile found at %s" profile))
+    (let* ((html (concat (file-name-sans-extension profile) ".html"))
+           (exit (call-process "go" nil nil nil "tool" "cover"
+                                (format "-html=%s" profile)
+                                (format "-o=%s" html))))
+      (if (zerop exit)
+          (browse-url-of-file html)
+        (user-error "Egret: `go tool cover' failed (exit %d)" exit)))))
 
 ;;; Minor mode
 
