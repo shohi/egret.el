@@ -1,3 +1,13 @@
 * Egret
 
-Emacs interface of go test
+Emacs interface of go test, using tree-sitter to find tests, subtests, and
+run them.
+
+** Acknowledgements
+
+Egret is inspired by, and would not exist without, these two packages:
+
+- [[https://github.com/nlamirault/gotest.el][gotest.el]] — the execution and compilation infrastructure (test history,
+  coverage, benchmarks, whole-project runs) is ported from here.
+- [[https://github.com/chmouel/gotest-ts.el][gotest-ts.el]] — the tree-sitter based test and subtest detection, DWIM
+  execution, and navigation approach is inspired by this package.
