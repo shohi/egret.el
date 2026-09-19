@@ -4,7 +4,7 @@
 
 ;; Author: Shohi
 ;; URL: https://github.com/shohi/egret.el
-;; Version: 0.1.0
+;; Version: 0.2.0
 ;; Package-Requires: ((emacs "31.1"))
 ;; Keywords: languages, go, tests, tools
 

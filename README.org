@@ -1,7 +1,126 @@
 * Egret
 
-Emacs interface of go test, using tree-sitter to find tests, subtests, and
-run them.
+Run Go tests, table-driven subtests, testify suites, benchmarks, fuzz
+targets, and coverage from Emacs, using tree-sitter to find them.
+Targets =go-ts-mode= (Emacs 31.1+).
+
+** Installation
+
+Manual, or via your package manager of choice pointed at this repo, e.g.
+with Elpaca:
+
+#+begin_src elisp
+(use-package egret
+  :ensure (:host github :repo "shohi/egret.el")
+  :hook (go-ts-mode . egret-mode))
+#+end_src
+
+Or enable it everywhere =go-ts-mode= is used, in one line:
+
+#+begin_src elisp
+(egret-global-mode 1)
+#+end_src
+
+=egret-global-mode= enables =egret-mode= in any buffer whose major mode
+is (or derives from) =go-ts-mode=; it does nothing to other buffers.
+
+** Commands
+
+*** Running tests
+
+| Command             | Runs                                                        |
+|----------------------+---------------------------------------------------------------|
+| =egret-dwim=         | The test, table-driven subtest, or testify suite method at point |
+| =egret-run-function= | The whole enclosing test/suite entry, ignoring subtest context |
+| =egret-run-file=     | Every top-level test function in the current file             |
+| =egret-run-package=  | Every test in the current package (=go test .=)                |
+| =egret-run-project=  | Every test in every package of the module (=go list ./...=)    |
+| =egret-run-last=     | Replays the most recent command verbatim                      |
+
+=egret-dwim= is the main entry point: put point on a =TestFoo= function,
+inside a table-driven subtest's =\{name: "...", ...\}= entry, or inside a
+testify =func (s *FooSuite) TestBar()= method, and it runs exactly that.
+
+*** Benchmarks and fuzzing
+
+| Command                        | Runs                                          |
+|----------------------------------+--------------------------------------------------|
+| =egret-run-benchmark=            | The benchmark at point                        |
+| =egret-run-file-benchmarks=      | Every benchmark in the current file           |
+| =egret-run-project-benchmarks=   | Every benchmark in every package of the module |
+| =egret-run-fuzz=                 | The fuzz target at point                      |
+
+=go test= only supports fuzzing one target per invocation, so there is no
+file- or project-wide fuzz command.
+
+*** Coverage
+
+| Command                    | Does                                                    |
+|------------------------------+------------------------------------------------------------|
+| =egret-coverage=             | Runs the current package with =--coverprofile=          |
+| =egret-coverage-show-html=   | Generates and opens an HTML report for that profile     |
+
+*** Navigation
+
+| Command               | Does                                                          |
+|-------------------------+------------------------------------------------------------------|
+| =egret-next-subtest=   | Jump to the next table-driven subtest, wraps around             |
+| =egret-prev-subtest=   | Jump to the previous one, wraps around                          |
+| =egret-imenu-goto=     | Jump to any test/subtest via =imenu=, enabling it first if needed |
+| =egret-imenu-index=    | Enable =imenu= support in the current buffer explicitly          |
+| =egret-show-info=      | Report what egret detects at point (test/subtest/suite/nothing) |
+
+*** Prefix argument (applies to every =egret-run-*= and =egret-dwim=/=egret-run-function=)
+
+| Prefix           | Effect                                          |
+|-------------------+---------------------------------------------------|
+| none              | Run with the configured defaults                |
+| numeric, e.g. =C-5=| Add =-count=5=                                   |
+| =C-u -= or =C-u C-u=| Re-run with the most recent history entry      |
+| =C-u= or =C-u C-u C-u=| Prompt, editable, with history completion   |
+
+** Keybindings
+
+=egret-mode-map= binds the most common commands under =C-c C-t=, and
+deliberately shadows built-in =go-ts-mode-map='s =C-c C-t t/f/p= with
+egret's richer equivalents:
+
+| Key         | Command                       |
+|-------------+---------------------------------|
+| =C-c C-t t= | =egret-dwim=                   |
+| =C-c C-t T= | =egret-run-function=           |
+| =C-c C-t f= | =egret-run-file=               |
+| =C-c C-t p= | =egret-run-package=            |
+| =C-c C-t P= | =egret-run-project=            |
+| =C-c C-t l= | =egret-run-last=               |
+| =C-c C-t b= | =egret-run-benchmark=          |
+| =C-c C-t B= | =egret-run-project-benchmarks= |
+| =C-c C-t c= | =egret-coverage=               |
+| =C-c C-t C= | =egret-coverage-show-html=     |
+| =C-c C-t n= | =egret-next-subtest=           |
+| =C-c C-t N= | =egret-prev-subtest=           |
+| =C-c C-t m= | =egret-imenu-goto=             |
+| =C-c C-t i= | =egret-show-info=              |
+
+=egret-run-fuzz= and =egret-run-file-benchmarks= have no binding by
+design (less common); use =M-x=.
+
+** Customization
+
+| Variable                    | Default       | Meaning                                        |
+|-------------------------------+---------------+---------------------------------------------------|
+| =egret-subtest-field-name=   | ="name"=      | Struct field that names a table-driven subtest  |
+| =egret-test-args=            | =nil=         | Extra args for every =go test= run              |
+| =egret-verbose=              | =nil=         | Always pass =-v=                                |
+| =egret-bench-args=           | =nil=         | Extra args for =-bench= runs                    |
+| =egret-fuzz-args=            | =nil=         | Extra args for =-fuzz= runs                     |
+| =egret-coverage-file=        | ="cover.out"= | Coverage profile file name                      |
+| =egret-compilation-error-regexp-alist= | stdlib/testify/panic/compiler/linker | Patterns used for =next-error= in the output buffer |
+
+** Known limitations
+
+- =egret-dwim= does not yet run every test covered by an active region
+  (an old =gotest.el= behavior); it only ever targets the test at point.
 
 ** Acknowledgements
 
@@ -11,3 +130,7 @@ Egret is inspired by, and would not exist without, these two packages:
   coverage, benchmarks, whole-project runs) is ported from here.
 - [[https://github.com/chmouel/gotest-ts.el][gotest-ts.el]] — the tree-sitter based test and subtest detection, DWIM
   execution, and navigation approach is inspired by this package.
+
+** License
+
+GPL-3.0-or-later, see [[./LICENSE][LICENSE]].
