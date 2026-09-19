@@ -5,7 +5,7 @@
 ;; Author: Shohi
 ;; URL: https://github.com/shohi/egret.el
 ;; Version: 0.2.0
-;; Package-Requires: ((emacs "31.1"))
+;; Package-Requires: ((emacs "31.1") (transient "0.7.0"))
 ;; Keywords: languages, go, tests, tools
 
 ;; This program is free software; you can redistribute it and/or modify
@@ -46,6 +46,7 @@
 (require 'treesit)
 (require 'subr-x)
 (require 'pcase)
+(require 'transient)
 
 (defgroup egret nil
   "Run Go tests and subtests with tree-sitter."
@@ -57,6 +58,7 @@
 Typically \"name\", but could be \"description\", \"testName\", etc.,
 depending on project convention."
   :type 'string
+  :safe #'stringp
   :group 'egret)
 
 ;;; Detection (private)
@@ -257,11 +259,13 @@ enclosing test function or suite entry, ignoring any subtest context."
 (defcustom egret-test-args nil
   "Extra arguments to pass to every `go test' invocation."
   :type '(choice (const :tag "None" nil) string)
+  :safe (lambda (v) (or (null v) (stringp v)))
   :group 'egret)
 
 (defcustom egret-verbose nil
   "Non-nil to always pass -v to `go test'."
   :type 'boolean
+  :safe #'booleanp
   :group 'egret)
 
 (defvar egret-history nil
@@ -314,8 +318,8 @@ enclosing test function or suite entry, ignoring any subtest context."
   "Minimal highlighting expressions for `egret-compilation-mode'.")
 
 (defvar egret-compilation-error-regexp-alist-alist
-  '((egret-testing . ("^\t\\([[:alnum:]-_/.]+\\.go\\):\\([0-9]+\\): .*$" 1 2))
-    (egret-testify . ("^\tLocation:\t\\([[:alnum:]-_/.]+\\.go\\):\\([0-9]+\\)$" 1 2))
+  '((egret-testing . ("^[ \t]+\\([[:alnum:]-_/.]+\\.go\\):\\([0-9]+\\): .*$" 1 2))
+    (egret-testify . ("^[ \t]*Error Trace:[ \t]*\\([[:alnum:]-_/.]+\\.go\\):\\([0-9]+\\)$" 1 2))
     (egret-gopanic . ("^\t\\([[:alnum:]-_/.]+\\.go\\):\\([0-9]+\\) \\+0x\\(?:[0-9a-f]+\\)" 1 2))
     (egret-compile . ("^\\([[:alnum:]-_/.]+\\.go\\):\\([0-9]+\\):\\(?:\\([0-9]+\\):\\)? .*$" 1 2 3))
     (egret-linkage . ("^\\([[:alnum:]-_/.]+\\.go\\):\\([0-9]+\\): undefined: .*$" 1 2)))
@@ -463,11 +467,13 @@ vendored packages."
 (defcustom egret-bench-args nil
   "Extra arguments to pass to every `go test -bench' invocation."
   :type '(choice (const :tag "None" nil) string)
+  :safe (lambda (v) (or (null v) (stringp v)))
   :group 'egret)
 
 (defcustom egret-fuzz-args nil
   "Extra arguments to pass to every `go test -fuzz' invocation."
   :type '(choice (const :tag "None" nil) string)
+  :safe (lambda (v) (or (null v) (stringp v)))
   :group 'egret)
 
 (defun egret--flagged-run-args (flag pattern extra-args)
@@ -485,6 +491,7 @@ PATTERN is single-quoted, matching `egret--build-command' -- a bare
   "File name for the `go test' coverage profile.
 Relative to `default-directory' unless given as an absolute path."
   :type 'string
+  :safe #'stringp
   :group 'egret)
 
 (defvar egret--last-coverage-file nil
@@ -848,6 +855,34 @@ already active."
     (egret-imenu-index))
   (call-interactively #'imenu))
 
+;;;###autoload
+(transient-define-prefix egret-transient ()
+  "Popup menu for egret commands.
+A second entry point alongside `egret-mode-map's direct bindings;
+also surfaces `egret-run-fuzz' and `egret-run-file-benchmarks', which
+have no direct binding."
+  [["Run"
+    ("t" "Dwim (test/subtest/suite/region)" egret-dwim)
+    ("T" "Whole test/suite" egret-run-function)
+    ("f" "File" egret-run-file)
+    ("p" "Package" egret-run-package)
+    ("P" "Project" egret-run-project)
+    ("l" "Last" egret-run-last)]
+   ["Bench & Fuzz"
+    ("b" "Benchmark at point" egret-run-benchmark)
+    ("F" "File benchmarks" egret-run-file-benchmarks)
+    ("B" "Project benchmarks" egret-run-project-benchmarks)
+    ("z" "Fuzz at point" egret-run-fuzz)]
+   ["Coverage"
+    ("c" "Run coverage" egret-coverage)
+    ("C" "Show HTML report" egret-coverage-show-html)
+    ("v" "Toggle inline overlay" egret-coverage-overlay-mode)]
+   ["Navigate"
+    ("n" "Next subtest" egret-next-subtest)
+    ("N" "Prev subtest" egret-prev-subtest)
+    ("m" "Imenu" egret-imenu-goto)
+    ("i" "Show info" egret-show-info)]])
+
 ;;; Minor mode
 
 (defvar-keymap egret-mode-map
@@ -855,7 +890,8 @@ already active."
 Deliberately shadows built-in `go-ts-mode-map's C-c C-t t/f/p with
 egret's richer DWIM/scope equivalents; see the migration plan for the
 rationale.  egret-run-fuzz and egret-run-file-benchmarks have no
-binding by design (less common, M-x only)."
+direct binding (less common), but are reachable via `egret-transient'."
+  "C-c C-t C-t" #'egret-transient
   "C-c C-t t" #'egret-dwim
   "C-c C-t T" #'egret-run-function
   "C-c C-t f" #'egret-run-file

@@ -111,8 +111,8 @@ egret's richer equivalents:
 | =C-c C-t m= | =egret-imenu-goto=             |
 | =C-c C-t i= | =egret-show-info=              |
 
-=egret-run-fuzz= and =egret-run-file-benchmarks= have no binding by
-design (less common); use =M-x=.
+=egret-run-fuzz= and =egret-run-file-benchmarks= have no *direct* key
+binding (less common); use =M-x= or =C-c C-t C-t=.
 
 ** Customization
 
@@ -136,6 +136,11 @@ Egret is inspired by, and would not exist without, these two packages:
   coverage, benchmarks, whole-project runs) is ported from here.
 - [[https://github.com/chmouel/gotest-ts.el][gotest-ts.el]] — the tree-sitter based test and subtest detection, DWIM
   execution, and navigation approach is inspired by this package.
+
+** License
+
+GPL-3.0-or-later, see [[./LICENSE][LICENSE]].
+avigation approach is inspired by this package.
 
 ** License
 
