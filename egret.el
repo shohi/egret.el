@@ -367,11 +367,14 @@ HISTORY for completion)."
   "Return the full `go test' shell command for raw ARGS.
 ARGS is a complete `go test' argument string, such as a -run pattern
 target (\".\"), a bare \".\", or package paths joined by spaces.
-Honors `egret-test-args', `egret-verbose', and `current-prefix-arg'
-\(see `egret--get-arguments')."
+Honors `egret-test-args' and `current-prefix-arg' (see
+`egret--get-arguments'); adds \"-v\" if `egret-verbose' is set, or if
+the calling buffer has `egret-status-overlay-mode' enabled -- without
+it, `go test' never prints \"--- PASS\"/\"--- SKIP\" lines, only
+failures, so the overlay would otherwise show fails only."
   (when egret-test-args
     (setq args (concat egret-test-args " " args)))
-  (when egret-verbose
+  (when (or egret-verbose (bound-and-true-p egret-status-overlay-mode))
     (setq args (concat "-v " args)))
   (concat "go test " (egret--get-arguments args 'egret-history)))
 
@@ -396,21 +399,91 @@ PROCESS and EVENT are as passed to any process sentinel."
   (when (equal event "finished\n")
     (message "Egret: test run finished.")))
 
+(defface egret-status-pass-face
+  '((t :inherit success))
+  "Face for a top-level test/benchmark/fuzz function that just passed."
+  :group 'egret)
+
+(defface egret-status-fail-face
+  '((t :inherit error))
+  "Face for a top-level test/benchmark/fuzz function that just failed."
+  :group 'egret)
+
+(defvar-local egret--status-overlays nil
+  "Overlays created by `egret-status-overlay-mode's refresh in this buffer.")
+
+(defun egret--clear-status-overlays ()
+  "Delete all overlays in `egret--status-overlays' and reset it."
+  (mapc #'delete-overlay egret--status-overlays)
+  (setq egret--status-overlays nil))
+
+(defun egret--parse-test-statuses (output)
+  "Return an alist of (NAME . STATUS) from `go test' OUTPUT.
+STATUS is one of `pass', `fail', or `skip'.  Only unindented
+\"--- RESULT: Name\" lines are considered, so a table-driven test's
+own aggregate result is used (Go itself rolls subtest failures up
+into it) rather than each individual subtest -- this is function-level
+status only, not per-subtest."
+  (let (result)
+    (with-temp-buffer
+      (insert output)
+      (goto-char (point-min))
+      (while (re-search-forward "^--- \\(PASS\\|FAIL\\|SKIP\\): \\([^ \t]+\\) " nil t)
+        (push (cons (match-string 2) (intern (downcase (match-string 1)))) result)))
+    (nreverse result)))
+
+(defun egret--apply-status-overlays (statuses)
+  "Highlight each top-level function's header line per STATUSES.
+STATUSES is an alist as returned by `egret--parse-test-statuses'.
+Only `pass'/`fail' get a face; `skip' is left unmarked.  Replaces any
+overlays a previous refresh left in this buffer."
+  (egret--clear-status-overlays)
+  (dolist (node (treesit-node-children (treesit-buffer-root-node) t))
+    (when (string= (treesit-node-type node) "function_declaration")
+      (let* ((name (egret--defun-node-name node))
+             (status (and name (alist-get name statuses nil nil #'string=)))
+             (face (pcase status
+                     ('pass 'egret-status-pass-face)
+                     ('fail 'egret-status-fail-face))))
+        (when face
+          (let* ((start (treesit-node-start node))
+                 (end (save-excursion (goto-char start) (line-end-position)))
+                 (ov (make-overlay start end)))
+            (overlay-put ov 'face face)
+            (overlay-put ov 'evaporate t)
+            (push ov egret--status-overlays)))))))
+
+(defun egret--maybe-refresh-status-overlays (source-buffer)
+  "Refresh SOURCE-BUFFER's pass/fail overlays from the just-finished run.
+No-op unless SOURCE-BUFFER is live and has `egret-status-overlay-mode'
+enabled."
+  (when (and (buffer-live-p source-buffer)
+             (buffer-local-value 'egret-status-overlay-mode source-buffer))
+    (let ((output (with-current-buffer egret--buffer-name (buffer-string))))
+      (with-current-buffer source-buffer
+        (egret--apply-status-overlays (egret--parse-test-statuses output))))))
+
 (defun egret--start (command &optional on-success)
   "Start COMMAND, a complete shell command, in `egret--buffer-name'.
 ON-SUCCESS, if non-nil, is called with no arguments after the process
 finishes with exit code 0 (i.e. on the `compilation-mode' \"finished\\n\"
-event), after `egret--finished-sentinel' has run."
-  (setq egret-last-command command)
-  (egret--cleanup egret--buffer-name)
-  (compilation-start command 'egret-compilation-mode
-                      (lambda (_mode-name) egret--buffer-name))
-  (set-process-sentinel
-   (get-buffer-process egret--buffer-name)
-   (lambda (process event)
-     (egret--finished-sentinel process event)
-     (when (and on-success (equal event "finished\n"))
-       (funcall on-success)))))
+event), after `egret--finished-sentinel' has run.  Regardless of
+ON-SUCCESS or exit code, also refreshes pass/fail status overlays in
+the buffer COMMAND was started from (see
+`egret--maybe-refresh-status-overlays') once the process terminates."
+  (let ((source-buffer (current-buffer)))
+    (setq egret-last-command command)
+    (egret--cleanup egret--buffer-name)
+    (compilation-start command 'egret-compilation-mode
+                        (lambda (_mode-name) egret--buffer-name))
+    (set-process-sentinel
+     (get-buffer-process egret--buffer-name)
+     (lambda (process event)
+       (egret--finished-sentinel process event)
+       (unless (process-live-p process)
+         (egret--maybe-refresh-status-overlays source-buffer))
+       (when (and on-success (equal event "finished\n"))
+         (funcall on-success))))))
 
 (defun egret--run-args (args &optional on-success)
   "Run `go test' with raw ARGS (see `egret--build-command-from-args').
@@ -747,6 +820,21 @@ Enabling calls `egret-coverage-overlay-show'; disabling clears it."
     (egret-coverage-overlay-clear)))
 
 ;;;###autoload
+(define-minor-mode egret-status-overlay-mode
+  "Toggle inline pass/fail status highlighting in the current buffer.
+When enabled, every `egret--run'-based command (dwim, run-file,
+run-package, ...) run from this buffer refreshes it afterwards: each
+top-level test/benchmark/fuzz function's header line is highlighted
+`egret-status-pass-face' or `egret-status-fail-face' (function-level
+only -- a table-driven test's own aggregate result is used, not each
+subtest).  Disabling clears the overlays; enabling does not show
+anything until the next run."
+  :lighter " Status"
+  :group 'egret
+  (unless egret-status-overlay-mode
+    (egret--clear-status-overlays)))
+
+;;;###autoload
 (defun egret-coverage-show-html ()
   "Open an HTML report for the most recent `egret-coverage' profile.
 Generates it via \"go tool cover -html\" next to the profile, then
@@ -876,7 +964,9 @@ have no direct binding."
    ["Coverage"
     ("c" "Run coverage" egret-coverage)
     ("C" "Show HTML report" egret-coverage-show-html)
-    ("v" "Toggle inline overlay" egret-coverage-overlay-mode)]
+    ("v" "Toggle coverage overlay" egret-coverage-overlay-mode)]
+   ["Status"
+    ("s" "Toggle pass/fail overlay" egret-status-overlay-mode)]
    ["Navigate"
     ("n" "Next subtest" egret-next-subtest)
     ("N" "Prev subtest" egret-prev-subtest)
@@ -902,6 +992,7 @@ direct binding (less common), but are reachable via `egret-transient'."
   "C-c C-t B" #'egret-run-project-benchmarks
   "C-c C-t c" #'egret-coverage
   "C-c C-t C" #'egret-coverage-show-html
+  "C-c C-t s" #'egret-status-overlay-mode
   "C-c C-t n" #'egret-next-subtest
   "C-c C-t N" #'egret-prev-subtest
   "C-c C-t m" #'egret-imenu-goto

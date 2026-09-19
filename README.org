@@ -69,6 +69,18 @@ Coverage matching works by resolving the buffer's Go import path via
 =go list=, so it only lights up files that have coverage data of their
 own (not =_test.go= files themselves, for example).
 
+*** Pass/fail status
+
+| Command                      | Does                                                       |
+|--------------------------------+---------------------------------------------------------------|
+| =egret-status-overlay-mode=   | Enable to auto-highlight each top-level test's header line green/red after every run from this buffer |
+
+Function-level only: a table-driven test's own aggregate result is
+used (Go rolls subtest failures up into it), not each individual
+subtest. Enabling this mode also forces =-v= on every run from that
+buffer (=go test= only prints =--- PASS=/=--- SKIP= lines with =-v=;
+without it, only failures are visible to highlight).
+
 *** Navigation
 
 | Command               | Does                                                          |
@@ -106,6 +118,7 @@ egret's richer equivalents:
 | =C-c C-t B= | =egret-run-project-benchmarks= |
 | =C-c C-t c= | =egret-coverage=               |
 | =C-c C-t C= | =egret-coverage-show-html=     |
+| =C-c C-t s= | =egret-status-overlay-mode=    |
 | =C-c C-t n= | =egret-next-subtest=           |
 | =C-c C-t N= | =egret-prev-subtest=           |
 | =C-c C-t m= | =egret-imenu-goto=             |
@@ -127,6 +140,8 @@ binding (less common); use =M-x= or =C-c C-t C-t=.
 | =egret-compilation-error-regexp-alist= | stdlib/testify/panic/compiler/linker | Patterns used for =next-error= in the output buffer |
 | =egret-coverage-covered-face=    | inherits =diff-added=   | Face for covered lines |
 | =egret-coverage-uncovered-face=  | inherits =diff-removed= | Face for uncovered lines |
+| =egret-status-pass-face=         | inherits =success=      | Face for a passing test's header line |
+| =egret-status-fail-face=         | inherits =error=        | Face for a failing test's header line |
 
 ** Acknowledgements
 
