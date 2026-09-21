@@ -155,8 +155,3 @@ Egret is inspired by, and would not exist without, these two packages:
 ** License
 
 GPL-3.0-or-later, see [[./LICENSE][LICENSE]].
-avigation approach is inspired by this package.
-
-** License
-
-GPL-3.0-or-later, see [[./LICENSE][LICENSE]].
