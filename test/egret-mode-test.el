@@ -25,6 +25,7 @@
                   ("C-c C-t n" . egret-next-subtest)
                   ("C-c C-t N" . egret-prev-subtest)
                   ("C-c C-t m" . egret-imenu-goto)
+                  ("C-c C-t a" . egret-visit-alternate-file)
                   ("C-c C-t i" . egret-show-info))))
     (dolist (case cases)
       (should (eq (lookup-key egret-mode-map (kbd (car case))) (cdr case))))))
@@ -44,6 +45,16 @@
         (egret-imenu-goto))
       (should (eq imenu-create-index-function #'egret--imenu-create-index))
       (should called))))
+
+(ert-deftest egret-test-alternate-file-name ()
+  (should (equal "/a/b_test.go" (egret-alternate-file-name "/a/b.go")))
+  (should (equal "/a/b.go" (egret-alternate-file-name "/a/b_test.go")))
+  ;; only the suffix is rewritten
+  (should (equal "/x_test.go/b_test.go"
+                 (egret-alternate-file-name "/x_test.go/b.go")))
+  (should-error (egret-alternate-file-name "/a/b.el") :type 'user-error)
+  (with-temp-buffer
+    (should-error (egret-alternate-file-name) :type 'user-error)))
 
 (ert-deftest egret-test-maybe-enable-in-go-ts-mode ()
   (with-temp-buffer
