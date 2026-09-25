@@ -89,6 +89,7 @@ without it, only failures are visible to highlight).
 | =egret-prev-subtest=   | Jump to the previous one, wraps around                          |
 | =egret-imenu-goto=     | Jump to any test/subtest via =imenu=, enabling it first if needed |
 | =egret-imenu-index=    | Enable =imenu= support in the current buffer explicitly          |
+| =egret-visit-alternate-file= | Switch between =foo.go= and =foo_test.go=                  |
 | =egret-show-info=      | Report what egret detects at point (test/subtest/suite/nothing) |
 
 *** Prefix argument (applies to every =egret-run-*= and =egret-dwim=/=egret-run-function=)
@@ -122,6 +123,7 @@ egret's richer equivalents:
 | =C-c C-t n= | =egret-next-subtest=           |
 | =C-c C-t N= | =egret-prev-subtest=           |
 | =C-c C-t m= | =egret-imenu-goto=             |
+| =C-c C-t a= | =egret-visit-alternate-file=   |
 | =C-c C-t i= | =egret-show-info=              |
 
 =egret-run-fuzz= and =egret-run-file-benchmarks= have no *direct* key

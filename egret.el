@@ -908,6 +908,22 @@ Wraps around to the last subtest before the first one."
         (message "Egret: subtest %S (%d/%d)"
                  (cdr entry) (1+ prev) (length subtests))))))
 
+(defun egret-alternate-file-name (&optional file)
+  "Return the test file of FILE, or the implementation of a test FILE.
+FILE defaults to the file visited by the current buffer."
+  (let ((file (or file (buffer-file-name))))
+    (unless (and file (string-suffix-p ".go" file))
+      (user-error "Egret: not visiting a Go file"))
+    (if (string-suffix-p "_test.go" file)
+        (concat (string-remove-suffix "_test.go" file) ".go")
+      (concat (string-remove-suffix ".go" file) "_test.go"))))
+
+;;;###autoload
+(defun egret-visit-alternate-file ()
+  "Visit the test file of the current Go file, or its implementation."
+  (interactive)
+  (find-file (egret-alternate-file-name)))
+
 (defun egret--imenu-create-index ()
   "Create an imenu index of test functions and their subtests.
 Subtest entries are named \"TestName::subtest_name\"."
@@ -971,6 +987,7 @@ have no direct binding."
     ("n" "Next subtest" egret-next-subtest)
     ("N" "Prev subtest" egret-prev-subtest)
     ("m" "Imenu" egret-imenu-goto)
+    ("a" "Alternate file" egret-visit-alternate-file)
     ("i" "Show info" egret-show-info)]])
 
 ;;; Minor mode
@@ -996,6 +1013,7 @@ direct binding (less common), but are reachable via `egret-transient'."
   "C-c C-t n" #'egret-next-subtest
   "C-c C-t N" #'egret-prev-subtest
   "C-c C-t m" #'egret-imenu-goto
+  "C-c C-t a" #'egret-visit-alternate-file
   "C-c C-t i" #'egret-show-info)
 
 ;;;###autoload
